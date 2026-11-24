@@ -3,8 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>数学术语实时翻译 · Math Terms Live</title>
+<title>Yanobay · 数学术语实时翻译</title>
 <meta name="description" content="数学专业术语中英实时翻译：输入即查，句段级术语替换，闪卡复习。">
+<meta name="author" content="Yanobay">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%234f46e5'/%3E%3Ctext x='32' y='45' font-size='38' text-anchor='middle' fill='white' font-family='serif'%3E%E2%88%91%3C/text%3E%3C/svg%3E">
 <style>
   :root{
@@ -337,6 +338,9 @@
 
   /* ---------- misc ---------- */
   footer{margin:56px 0 36px; text-align:center; font-size:12.5px; color:var(--ink3); line-height:1.9}
+  footer a{color:var(--brand); text-decoration:none; transition:.18s}
+  footer a:hover{text-decoration:underline}
+  .foot-credit{display:inline-block; margin-top:7px}
   #toast{
     position:fixed; left:50%; bottom:28px; transform:translate(-50%,10px); z-index:100;
     background:var(--ink); color:var(--bg); font-size:13px; padding:10px 18px; border-radius:11px;
@@ -371,7 +375,7 @@
     <div class="brand">
       <span class="logo">∑</span>
       <div>
-        <div class="brand-name">数学术语实时翻译</div>
+        <div class="brand-name">Yanobay</div>
         <div class="brand-sub">Math Terms · Live Translator</div>
       </div>
     </div>
@@ -549,7 +553,8 @@
 
 <footer>
   术语库内置于页面，完全离线可用 · 收藏保存在本机浏览器<br>
-  共 <span id="footTotal">285</span> 条数学专业术语 · 实时检索与对照翻译
+  共 <span id="footTotal">285</span> 条数学专业术语 · 实时检索与对照翻译<br>
+  <span class="foot-credit">Made by Yanobay · <a href="mailto:3636416825@qq.com">3636416825@qq.com</a></span>
 </footer>
 
 <div id="toast"></div>
