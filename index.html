@@ -513,7 +513,7 @@
           </div>
         </div>
 
-        <div class="voice-note">建议使用 Chrome / Edge 并允许麦克风权限；语音识别需要联网。开启「在线整句翻译」时，转写文本会发送到在线翻译服务；关闭后仅在本地做术语对照。</div>
+        <div class="voice-note">语音识别功能的可用情况取决于浏览器是否内置相关能力。国内安卓 WebView 多数未内置，建议用 Chrome 或其他 Chromium 内核浏览器，首次启动需授权麦克风并联网。「在线整句翻译」开启时，转写文本会发送到公共翻译接口；关闭后仅做本地术语对照。</div>
       </div>
 
       <div class="voice-main">
@@ -604,11 +604,11 @@
       <p>你画我猜好友版。开间只属于朋友的房间，或随机匹配一位画友，2–6 人轮流当画手。</p>
       <span class="app-tag">多人 · 实时 · 手机也能画</span>
     </a>
-    <a class="app-card" href="https://37kanfpkgzozhx1wnl8.traesite.cn/" target="_blank" rel="noopener">
+    <a class="app-card" href="./xianqi/">
       <div class="app-top"><span class="app-badge">对弈</span><span class="app-arrow">↗</span></div>
       <h3>闲棋</h3>
-      <p>十五路五子棋，无禁手。三种 AI 棋风可挑，也能开一间房把房号发给朋友。</p>
-      <span class="app-tag">五子棋 · 好友房 · 每日一局</span>
+      <p>十五路五子棋，无禁手。暖手、顺手、较劲三种棋风，随手就能来一局。</p>
+      <span class="app-tag">五子棋 · AI 对局 · 每日一局</span>
     </a>
   </div>
 </section>
@@ -5752,7 +5752,39 @@ function toast(msg){
 /* ============================================================
    语音翻译
    ============================================================ */
-const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+/* ---------- 能力检测（按优先级降级） ---------- */
+(function(){
+  const SR_RAW = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const UA = navigator.userAgent || "";
+  const isAndroid = /Android/i.test(UA);
+  const isWebView = /Version\/[\d.]+ Chrome\/[\d.]+ Mobile/i.test(UA) || /MQQBrowser|MicroMessenger|HuaweiBrowser|HUAWEI|Xiaomi|MiuiBrowser|OPPO|VivoBrowser|QQBrowser|Baidu|Sogou|360|WebView/i.test(UA);
+
+  // Web Speech API (ASR) 目前只有 Chrome / Edge / Safari 前缀实现；安卓国内 WebView 几乎全缺失。
+  // 有条件的 UA 检测只用于提示优化，真正开关靠 SR 本身。
+  const SR = SR_RAW ? SR_RAW : null;
+  const TTS = "speechSynthesis" in window;
+
+  // 安卓 WebView 且无 SR 时，标记为"仅支持朗读、不支持识别"
+  const SpeechInfo = {
+    sr: !!SR,
+    tts: !!TTS,
+    android: isAndroid,
+    webview: isWebView,
+    SR_RAW: SR,
+    hint: !SR
+      ? (isAndroid
+          ? "当前浏览器未内置语音识别。建议用 Chrome 或开启系统级浏览器权限；仍可使用文字输入和内置朗读。"
+          : "当前浏览器不支持语音识别。仍可使用文字输入和内置朗读。")
+      : (isAndroid
+          ? "已检测到语音识别，首次启动需授权麦克风并联网。"
+          : "已检测到语音识别，点击麦克风即可。")
+  };
+
+  window.SpeechInfo = SpeechInfo;
+})();
+
+const SR = (window.SpeechInfo && window.SpeechInfo.SR_RAW) || null;
 const TranslatorAPI = (typeof Translator !== "undefined" && Translator) ||
                       (window.ai && (window.ai.translator || window.translator)) || null;
 
@@ -5765,7 +5797,13 @@ const Voice = {
   segments: [],
   translators: {},
   speak: false,
-  online: true
+  online: true,
+  // 节流 / 合并 / 状态锁
+  _interimBuf: "",
+  _interimRaf: 0,
+  _pendingTrans: false,   // 设备端翻译初始化中
+  _initPromise: null,     // ensureTranslator 单飞
+  _lastSpeakTime: 0
 };
 
 function fmtTime(s){
@@ -5773,16 +5811,16 @@ function fmtTime(s){
 }
 
 function setVoiceUI(){
-  const supported = !!SR;
+  const info = window.SpeechInfo || {sr: !!SR, tts: false, hint: "语音功能状态未知"};
   $("#micBtn").classList.toggle("rec", Voice.recording);
-  $("#micBtn").disabled = !supported;
-  $("#micBtn").style.opacity = supported ? "1" : ".45";
-  $("#voiceStatus").textContent = supported
+  $("#micBtn").disabled = !info.sr;
+  $("#micBtn").style.opacity = info.sr ? "1" : ".45";
+  $("#voiceStatus").textContent = info.sr
     ? (Voice.recording ? "正在聆听…" : "准备就绪")
-    : "当前浏览器不支持语音识别";
-  $("#voiceSub").textContent = supported
+    : "麦克风功能不可用";
+  $("#voiceSub").textContent = info.sr
     ? (Voice.recording ? "再次点击停止 · 边说边译" : "点击麦克风开始拾音")
-    : "请使用 Chrome / Edge 打开本页";
+    : info.hint;
   $("#voiceTimer").textContent = fmtTime(Voice.seconds);
 }
 
@@ -5802,25 +5840,41 @@ function termReplacePlain(text, dir){
   return out + text.slice(last);
 }
 
+/* 设备端翻译：单飞 + 缓存，避免多段识别同时初始化重复加载模型 */
 async function ensureTranslator(dir){
   if(!TranslatorAPI || typeof TranslatorAPI.create !== "function") return null;
   if(Voice.translators[dir]) return Voice.translators[dir];
+  // 已有初始化在飞就直接等结果（单飞）
+  if(Voice._initPromise) return Voice._initPromise;
+
   const pair = dir === "en"
     ? {sourceLanguage: "en", targetLanguage: "zh"}
     : {sourceLanguage: "zh", targetLanguage: "en"};
-  try{
-    if(typeof TranslatorAPI.availability === "function"){
-      const a = await TranslatorAPI.availability(pair);
-      if(a === "unavailable") return null;
+
+  Voice._initPromise = (async () => {
+    try{
+      if(typeof TranslatorAPI.availability === "function"){
+        const a = await Promise.race([
+          TranslatorAPI.availability(pair),
+          new Promise(r => setTimeout(r, 3500))
+        ]);
+        if(a === "unavailable") return null;
+      }
+      const tr = await Promise.race([
+        TranslatorAPI.create(pair),
+        new Promise(r => setTimeout(r, 9000))
+      ]);
+      if(!tr) return null;
+      Voice.translators[dir] = tr;
+      return tr;
+    }catch(e){
+      return null;
+    }finally{
+      Voice._initPromise = null;
     }
-    const tr = await TranslatorAPI.create(pair);
-    Voice.translators[dir] = tr;
-    $("#engineLabel").textContent = "设备端整句翻译";
-    return tr;
-  }catch(e){
-    $("#engineLabel").textContent = "术语对照模式";
-    return null;
-  }
+  })();
+
+  return Voice._initPromise;
 }
 
 async function detectEngine(){
@@ -5858,22 +5912,56 @@ async function onlineTranslate(text, pair){
   }
 }
 
+/* 朗读：状态锁 + 节流 + 每次只播一条 */
 function speakText(text){
-  if(!("speechSynthesis" in window)) return;
+  if(!("speechSynthesis" in window) || !text) return;
+  const now = Date.now();
+  if(now - Voice._lastSpeakTime < 650) return;   // 连续朗读节流
+  Voice._lastSpeakTime = now;
+  try{
+    speechSynthesis.cancel();                      // 先清空队列
+  }catch(e){}
   const u = new SpeechSynthesisUtterance(text);
   u.lang = Voice.dir === "en" ? "zh-CN" : "en-US";
   u.rate = 1.03;
-  speechSynthesis.speak(u);
+  try{ speechSynthesis.speak(u); }catch(e){}
 }
 
+/* 滚动合并：rAF 节流，避免每次 addUtterance / interim 都强制回流 */
+let _scrollRaf = 0;
 function scrollVoice(){
-  const b = $("#voiceBody");
-  b.scrollTop = b.scrollHeight;
+  if(_scrollRaf) return;
+  _scrollRaf = requestAnimationFrame(() => {
+    _scrollRaf = 0;
+    const b = $("#voiceBody");
+    if(b) b.scrollTop = b.scrollHeight;
+  });
 }
+
+/* 术语替换结果短缓存：同一段 interim 不重复正则 */
+const _termCache = new Map();
+function termReplaceCached(text, dir){
+  if(!text) return "";
+  const k = dir + ":" + text;
+  if(_termCache.has(k)) return _termCache.get(k);
+  if(_termCache.size > 64) _termCache.clear();
+  const v = termReplacePlain(text, dir);
+  _termCache.set(k, v);
+  return v;
+}
+
+/* 异步队列：final result 顺序处理，避免翻译并发压主线程 */
+let _transQueue = Promise.resolve();
+function enqueueTranslate(fn){
+  _transQueue = _transQueue.then(fn).catch(() => {});
+  return _transQueue;
+}
+function resetTransQueue(){ _transQueue = Promise.resolve(); }
 
 async function addUtterance(src){
+  if(!src) return;
   $("#voiceEmpty").style.display = "none";
-  const item = {src, dst: "", engine: ""};
+  const item = {src, dst: "", engine: "", alive: true};
   Voice.segments.push(item);
 
   const el = document.createElement("div");
@@ -5883,38 +5971,45 @@ async function addUtterance(src){
   scrollVoice();
 
   const dstEl = el.querySelector(".u-dst");
-  let tr = await ensureTranslator(Voice.dir);
-  let text = "", engine = "term";
 
-  if(tr){
+  const doTranslate = async () => {
+    // 翻译回来时，如果条目已被清空就跳过（clearVoice 会把 alive 置 false）
+    if(!item.alive) return;
+    let text = "", engine = "term";
     try{
-      text = await tr.translate(src);
-      engine = "mt";
-    }catch(e){
-      text = "";
-      Voice.translators[Voice.dir] = null;
-    }
-  }
-  if(!text && Voice.online){
-    try{
-      text = await onlineTranslate(src, Voice.dir === "en" ? "en|zh-CN" : "zh-CN|en");
-      engine = "online";
-    }catch(e){
-      text = "";
-    }
-  }
-  if(!text){
-    text = termReplacePlain(src, Voice.dir);
-    engine = "term";
-  }
+      const tr = await ensureTranslator(Voice.dir);
+      if(tr && item.alive){
+        try{
+          text = await Promise.race([
+            tr.translate(src),
+            new Promise((_, r) => setTimeout(() => r(null), 5500))
+          ]);
+          engine = text ? "mt" : engine;
+        }catch(e){}
+      }
+    }catch(e){}
 
-  item.dst = text;
-  item.engine = engine;
-  const tag = engine === "mt" ? "机翻" : engine === "online" ? "在线" : "术语";
-  dstEl.classList.remove("pending");
-  dstEl.innerHTML = `${esc(text)}<span class="u-tag">${tag}</span>`;
-  if(Voice.speak) speakText(text);
-  scrollVoice();
+    if(!text && Voice.online && item.alive){
+      try{
+        text = await Promise.race([
+          onlineTranslate(src, Voice.dir === "en" ? "en|zh-CN" : "zh-CN|en"),
+          new Promise((_, r) => setTimeout(() => r(null), 5500))
+        ]);
+        if(text) engine = "online";
+      }catch(e){}
+    }
+    if(!text){ text = termReplaceCached(src, Voice.dir); engine = "term"; }
+    if(!item.alive) return;
+
+    item.dst = text; item.engine = engine;
+    const tag = engine === "mt" ? "机翻" : engine === "online" ? "在线" : "术语";
+    dstEl.classList.remove("pending");
+    dstEl.innerHTML = `${esc(text)}<span class="u-tag">${tag}</span>`;
+    if(Voice.speak) speakText(text);
+    scrollVoice();
+  };
+
+  enqueueTranslate(doTranslate);
 }
 
 function startVoice(){
@@ -5938,27 +6033,39 @@ function startVoice(){
         interim += r[0].transcript;
       }
     }
-    const box = $("#voiceInterim");
-    if(interim){
-      box.innerHTML = `<div class="interim-live">${esc(interim)}</div><div style="color:var(--ink3)">${esc(termReplacePlain(interim, Voice.dir))}</div>`;
-    } else {
-      box.innerHTML = "";
-    }
+    // interim 高频触发（100–200ms），用 rAF 节流；同一帧合并多次
+    if(Voice._interimRaf) cancelAnimationFrame(Voice._interimRaf);
+    Voice._interimBuf = interim;
+    Voice._interimRaf = requestAnimationFrame(() => {
+      Voice._interimRaf = 0;
+      const buf = Voice._interimBuf;
+      const box = $("#voiceInterim");
+      if(!box) return;
+      if(buf){
+        const preview = termReplaceCached(buf, Voice.dir);
+        box.innerHTML = `<div class="interim-live">${esc(buf)}</div><div style="color:var(--ink3)">${esc(preview)}</div>`;
+      } else {
+        box.innerHTML = "";
+      }
+    });
   };
 
   rec.onerror = ev => {
     if(ev.error === "no-speech" || ev.error === "aborted") return;
-    const msg = ev.error === "not-allowed" ? "麦克风权限被拒绝，请在地址栏允许后重试"
-      : ev.error === "network" ? "语音识别网络异常，请检查网络或换用 Edge"
-      : ev.error === "audio-capture" ? "未检测到麦克风设备"
-      : "识别出错：" + ev.error;
+    const info = window.SpeechInfo || {};
+    const msg = ev.error === "not-allowed"
+      ? "麦克风权限被拒绝。请在地址栏或系统设置里允许麦克风后再试。"
+      : ev.error === "network"
+        ? "语音识别需要联网。请检查网络，或关闭语音改用文字输入。"
+        : ev.error === "audio-capture"
+          ? "未检测到麦克风设备。"
+          : "识别状态异常（" + ev.error + "）。继续说通常会自动恢复。";
     $("#voiceSub").textContent = msg;
     if(ev.error === "not-allowed" || ev.error === "audio-capture"){
       Voice.recording = false;
       clearInterval(Voice.timer);
       Voice.rec = null;
       setVoiceUI();
-      $("#voiceSub").textContent = msg;
     }
   };
 
@@ -5999,13 +6106,19 @@ function stopVoice(){
 }
 
 function toggleVoice(){
-  if(!SR){ toast("当前浏览器不支持语音识别，请用 Chrome / Edge"); return; }
+  const info = window.SpeechInfo || {sr: !!SR};
+  if(!info.sr){
+    toast("当前浏览器未提供内置语音识别。可继续用文字输入翻译。");
+    return;
+  }
   if(Voice.recording) stopVoice();
   else startVoice();
 }
 
 function clearVoice(){
+  Voice.segments.forEach(s => s.alive = false);   // 让队列里还在飞的翻译回来时跳过渲染
   Voice.segments = [];
+  resetTransQueue();
   Voice.seconds = 0;
   $("#voiceTimer").textContent = "00:00";
   $("#voiceInterim").innerHTML = "";
